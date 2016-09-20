@@ -79,7 +79,7 @@ module Elasticsearch
 
             if Elasticsearch::Model.settings[:inheritance_enabled]
               self.ancestors.each do |klass|
-                next if klass == self
+                next if klass.name == self.name
                 break if value = klass.respond_to?(prop) && klass.send(prop)
               end
             end
