@@ -83,33 +83,23 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         assert_equal 'boolean', mappings.to_hash[:mytype][:properties][:foo][:type]
       end
 
-      should "define type as string by default" do
+      should "define type as 'text' by default" do
         mappings = Elasticsearch::Model::Indexing::Mappings.new :mytype
 
-        mappings.indexes :bar, {}
-        assert_equal 'string', mappings.to_hash[:mytype][:properties][:bar][:type]
+        mappings.indexes :bar
+        assert_equal 'text', mappings.to_hash[:mytype][:properties][:bar][:type]
       end
 
       should "define multiple fields" do
         mappings = Elasticsearch::Model::Indexing::Mappings.new :mytype
 
-        mappings.indexes :foo_1, type: 'string' do
-          indexes :raw, analyzer: 'keyword'
+        mappings.indexes :my_field, type: 'text' do
+          indexes :raw, type: 'keyword'
         end
 
-        mappings.indexes :foo_2, type: 'multi_field' do
-          indexes :raw, analyzer: 'keyword'
-        end
-
-        assert_equal 'string',  mappings.to_hash[:mytype][:properties][:foo_1][:type]
-        assert_equal 'string',  mappings.to_hash[:mytype][:properties][:foo_1][:fields][:raw][:type]
-        assert_equal 'keyword', mappings.to_hash[:mytype][:properties][:foo_1][:fields][:raw][:analyzer]
-        assert_nil              mappings.to_hash[:mytype][:properties][:foo_1][:properties]
-
-        assert_equal 'multi_field',  mappings.to_hash[:mytype][:properties][:foo_2][:type]
-        assert_equal 'string',  mappings.to_hash[:mytype][:properties][:foo_2][:fields][:raw][:type]
-        assert_equal 'keyword', mappings.to_hash[:mytype][:properties][:foo_2][:fields][:raw][:analyzer]
-        assert_nil              mappings.to_hash[:mytype][:properties][:foo_2][:properties]
+        assert_equal 'text',    mappings.to_hash[:mytype][:properties][:my_field][:type]
+        assert_equal 'keyword', mappings.to_hash[:mytype][:properties][:my_field][:fields][:raw][:type]
+        assert_nil              mappings.to_hash[:mytype][:properties][:my_field][:properties]
       end
 
       should "define embedded properties" do
@@ -134,15 +124,15 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         # Object is the default when `type` is missing and there's a block passed
         #
         assert_equal 'object', mappings.to_hash[:mytype][:properties][:foo][:type]
-        assert_equal 'string', mappings.to_hash[:mytype][:properties][:foo][:properties][:bar][:type]
+        assert_equal 'text',   mappings.to_hash[:mytype][:properties][:foo][:properties][:bar][:type]
         assert_nil             mappings.to_hash[:mytype][:properties][:foo][:fields]
 
         assert_equal 'object', mappings.to_hash[:mytype][:properties][:foo_object][:type]
-        assert_equal 'string', mappings.to_hash[:mytype][:properties][:foo_object][:properties][:bar][:type]
+        assert_equal 'text',   mappings.to_hash[:mytype][:properties][:foo_object][:properties][:bar][:type]
         assert_nil             mappings.to_hash[:mytype][:properties][:foo_object][:fields]
 
         assert_equal 'nested', mappings.to_hash[:mytype][:properties][:foo_nested][:type]
-        assert_equal 'string', mappings.to_hash[:mytype][:properties][:foo_nested][:properties][:bar][:type]
+        assert_equal 'text',   mappings.to_hash[:mytype][:properties][:foo_nested][:properties][:bar][:type]
         assert_nil             mappings.to_hash[:mytype][:properties][:foo_nested][:fields]
 
         assert_equal :nested, mappings.to_hash[:mytype][:properties][:foo_nested_as_symbol][:type]
@@ -181,9 +171,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
           (@callbacks ||= {})[block.hash] = block
         end
 
-        def changed_attributes; [:foo]; end
-
-        def changes
+        def changes_to_save
           {:foo => ['One', 'Two']}
         end
       end
@@ -196,9 +184,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
           (@callbacks ||= {})[block.hash] = block
         end
 
-        def changed_attributes; [:foo, :bar]; end
-
-        def changes
+        def changes_to_save
           {:foo => ['A', 'B'], :bar => ['C', 'D']}
         end
 
@@ -207,15 +193,28 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         end
       end
 
+      class ::DummyIndexingModelWithOldDirty
+        extend  Elasticsearch::Model::Indexing::ClassMethods
+        include Elasticsearch::Model::Indexing::InstanceMethods
+
+        def self.before_save(&block)
+          (@callbacks ||= {})[block.hash] = block
+        end
+
+        def changes
+          {:foo => ['One', 'Two']}
+        end
+      end
+
       should "register before_save callback when included" do
         ::DummyIndexingModelWithCallbacks.expects(:before_save).returns(true)
         ::DummyIndexingModelWithCallbacks.__send__ :include, Elasticsearch::Model::Indexing::InstanceMethods
       end
 
-      should "set the @__changed_attributes variable before save" do
+      should "set the @__changed_model_attributes variable before save" do
         instance = ::DummyIndexingModelWithCallbacks.new
         instance.expects(:instance_variable_set).with do |name, value|
-          assert_equal :@__changed_attributes, name
+          assert_equal :@__changed_model_attributes, name
           assert_equal({foo: 'Two'}, value)
           true
         end
@@ -223,6 +222,23 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         ::DummyIndexingModelWithCallbacks.__send__ :include, Elasticsearch::Model::Indexing::InstanceMethods
 
         ::DummyIndexingModelWithCallbacks.instance_variable_get(:@callbacks).each do |n,b|
+          instance.instance_eval(&b)
+        end
+      end
+
+      # https://github.com/elastic/elasticsearch-rails/issues/714
+      # https://github.com/rails/rails/pull/25337#issuecomment-225166796
+      should "set the @__changed_model_attributes variable before save for old ActiveModel::Dirty" do
+        instance = ::DummyIndexingModelWithOldDirty.new
+        instance.expects(:instance_variable_set).with do |name, value|
+          assert_equal :@__changed_model_attributes, name
+          assert_equal({foo: 'Two'}, value)
+          true
+        end
+
+        ::DummyIndexingModelWithOldDirty.__send__ :include, Elasticsearch::Model::Indexing::InstanceMethods
+
+        ::DummyIndexingModelWithOldDirty.instance_variable_get(:@callbacks).each do |n,b|
           instance.instance_eval(&b)
         end
       end
@@ -307,7 +323,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         instance = ::DummyIndexingModelWithCallbacks.new
 
         # Reset the fake `changes`
-        instance.instance_variable_set(:@__changed_attributes, nil)
+        instance.instance_variable_set(:@__changed_model_attributes, nil)
 
         instance.expects(:index_document)
         instance.update_document
@@ -318,7 +334,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         instance = ::DummyIndexingModelWithCallbacks.new
 
         # Set the fake `changes` hash
-        instance.instance_variable_set(:@__changed_attributes, {foo: 'bar'})
+        instance.instance_variable_set(:@__changed_model_attributes, {foo: 'bar'})
 
         client.expects(:update).with do |payload|
           assert_equal 'foo',  payload[:index]
@@ -341,7 +357,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         instance = ::DummyIndexingModelWithCallbacksAndCustomAsIndexedJson.new
 
         # Set the fake `changes` hash
-        instance.instance_variable_set(:@__changed_attributes, {'foo' => 'B', 'bar' => 'D' })
+        instance.instance_variable_set(:@__changed_model_attributes, {'foo' => 'B', 'bar' => 'D' })
 
         client.expects(:update).with do |payload|
           assert_equal({:foo => 'B'}, payload[:body][:doc])
@@ -360,7 +376,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         client   = mock('client')
         instance = ::DummyIndexingModelWithCallbacksAndCustomAsIndexedJson.new
 
-        instance.instance_variable_set(:@__changed_attributes, { 'foo' => { 'bar' => 'BAR'} })
+        instance.instance_variable_set(:@__changed_model_attributes, { 'foo' => { 'bar' => 'BAR'} })
         # Overload as_indexed_json
         instance.expects(:as_indexed_json).returns({ 'foo' => 'BAR' })
 
@@ -382,7 +398,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         instance = ::DummyIndexingModelWithCallbacks.new
 
         # Set the fake `changes` hash
-        instance.instance_variable_set(:@__changed_attributes, {author: 'john'})
+        instance.instance_variable_set(:@__changed_model_attributes, {author: 'john'})
 
         client.expects(:update).with do |payload|
           assert_equal 'foo',  payload[:index]
@@ -423,7 +439,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
     end
 
     context "Checking for index existence" do
-      context "the index exists" do
+      context "when the index exists" do
         should "return true" do
           indices = mock('indices', exists: true)
           client  = stub('client', indices: indices)
@@ -434,7 +450,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         end
       end
 
-      context "the index does not exists" do
+      context "when the index does not exists" do
         should "return false" do
           indices = mock('indices', exists: false)
           client  = stub('client', indices: indices)
@@ -445,7 +461,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         end
       end
 
-      context "the indices raises" do
+      context "when the indices API raises an error" do
         should "return false" do
           client  = stub('client')
           client.expects(:indices).raises(StandardError)
@@ -456,7 +472,7 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         end
       end
 
-      context "the indices raises" do
+      context "the indices.exists API raises an error" do
         should "return false" do
           indices = stub('indices')
           client  = stub('client')
@@ -536,6 +552,27 @@ class Elasticsearch::Model::IndexingTest < Test::Unit::TestCase
         DummyIndexingModelForRecreate.expects(:client).returns(client).at_least_once
 
         assert_nothing_raised { DummyIndexingModelForRecreate.create_index! }
+      end
+
+      should "get the index settings and mappings from options" do
+        client  = stub('client')
+        indices = stub('indices')
+        client.stubs(:indices).returns(indices)
+
+        indices.expects(:create).with do |payload|
+          assert_equal 'foobar', payload[:index]
+          assert_equal 3,        payload[:body][:settings][:index][:number_of_shards]
+          assert_equal 'bar', payload[:body][:mappings][:foobar][:properties][:foo][:analyzer]
+          true
+        end.returns({})
+
+        DummyIndexingModelForRecreate.expects(:index_exists?).returns(false)
+        DummyIndexingModelForRecreate.expects(:client).returns(client).at_least_once
+
+        DummyIndexingModelForRecreate.create_index! \
+          index: 'foobar',
+          settings: { index: { number_of_shards: 3 } },
+          mappings: { foobar: { properties: { foo: { analyzer: 'bar' } } } }
       end
 
       should "not create the index when it exists" do
